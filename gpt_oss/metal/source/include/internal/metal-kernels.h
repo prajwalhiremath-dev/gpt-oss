@@ -265,6 +265,22 @@ enum gptoss_status gptoss_metal_command_buffer_encode_launch_f32_softmax(
     uint32_t* num_threadgroups_out,
     uint32_t* num_channels_per_threadgroup_out);
 
+enum gptoss_status gptoss_metal_command_buffer_encode_launch_f32_sample(
+    const struct gptoss_metal_command_buffer* command_buffer,
+    const struct gptoss_metal_function* f32_sample_fn,
+    size_t min_threadgroup_size,
+    const struct gptoss_metal_buffer* prob_buffer,
+    size_t prob_offset,
+    const struct gptoss_metal_buffer* sum_buffer,
+    size_t sum_offset,
+    const struct gptoss_metal_buffer* prediction_buffer,
+    size_t prediction_offset,
+    uint64_t rng_seed,
+    uint32_t num_blocks,
+    uint32_t num_channels,
+    uint32_t num_channels_per_block,
+    uint32_t token_offset);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

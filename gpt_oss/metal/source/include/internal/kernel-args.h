@@ -103,3 +103,11 @@ struct gptoss_softmax_args {
     uint32_t max_threadgroups;
     float temperature;
 };
+
+struct gptoss_sample_args {
+    uint64_t seed;
+    uint32_t token_offset;
+    uint32_t num_blocks;
+    uint32_t num_dims;
+    uint32_t num_dims_per_block;
+};

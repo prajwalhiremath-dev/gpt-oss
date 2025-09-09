@@ -278,6 +278,12 @@ enum gptoss_status GPTOSS_ABI gptoss_model_create_from_file(
 
     prefetch_fd(fd, model_mapping_start, model_mapping_size, path);
 
+    if (mlock(model_mapping_ptr, model_mapping_size) != 0) {
+        GPTOSS_LOG_WARNING("mlock(%s, size=%zu) failed with error %d", path, model_mapping_size, errno);
+    } else {
+        model->lock_memory = true;
+    }
+
     // Initialize Metal
     status = gptoss_metal_device_create_system_default(&model->device);
     if (status != gptoss_status_success) {
@@ -335,6 +341,10 @@ enum gptoss_status GPTOSS_ABI gptoss_model_create_from_file(
         goto cleanup;
     }
     status = gptoss_metal_function_create(&model->library, "gptoss_f32_softmax", &model->f32_softmax_fn);
+    if (status != gptoss_status_success) {
+        goto cleanup;
+    }
+    status = gptoss_metal_function_create(&model->library, "gptoss_f32_sample", &model->f32_sample_fn);
     if (status != gptoss_status_success) {
         goto cleanup;
     }
@@ -409,45 +419,6 @@ enum gptoss_status GPTOSS_ABI gptoss_model_create_from_file(
         model->weights_size += moe_block_weight_size;
     }
 
-    // Activation buffers
-    status = gptoss_metal_buffer_create(&model->device, model->max_batch_tokens * model->embedding_dim * sizeof(float), NULL, &model->residual_activation_buffer);
-    if (status != gptoss_status_success) {
-        goto cleanup;
-    }
-    status = gptoss_metal_buffer_create(&model->device, model->max_batch_tokens * model->embedding_dim * sizeof(float), NULL, &model->rmsnorm_activation_buffer);
-    if (status != gptoss_status_success) {
-        goto cleanup;
-    }
-    status = gptoss_metal_buffer_create(&model->device, model->max_batch_tokens * model->head_dim * (model->num_heads + 2 * model->num_kv_heads) * sizeof(float), NULL, &model->qkv_activation_buffer);
-    if (status != gptoss_status_success) {
-        goto cleanup;
-    }
-    status = gptoss_metal_buffer_create(&model->device, model->max_batch_tokens * model->head_dim * model->num_heads * sizeof(float), NULL, &model->sdpa_activation_buffer);
-    if (status != gptoss_status_success) {
-        goto cleanup;
-    }
-    status = gptoss_metal_buffer_create(&model->device, model->max_batch_tokens * model->num_experts * sizeof(float), NULL, &model->gate_activation_buffer);
-    if (status != gptoss_status_success) {
-        goto cleanup;
-    }
-    status = gptoss_metal_buffer_create(&model->device, model->max_batch_tokens * model->num_experts * sizeof(struct gptoss_expert_prediction), NULL, &model->expert_activation_buffer);
-    if (status != gptoss_status_success) {
-        goto cleanup;
-    }
-    status = gptoss_metal_buffer_create(&model->device, model->max_batch_tokens * model->num_active_experts * model->mlp_dim * sizeof(float), NULL, &model->swiglu_activation_buffer);
-    if (status != gptoss_status_success) {
-        goto cleanup;
-    }
-    status = gptoss_metal_buffer_create(&model->device, model->max_batch_tokens * model->num_active_experts * model->embedding_dim * sizeof(float), NULL, &model->moe_activation_buffer);
-    if (status != gptoss_status_success) {
-        goto cleanup;
-    }
-
-    model->allocation_size =
-        model->residual_activation_buffer.size + model->rmsnorm_activation_buffer.size +
-        model->qkv_activation_buffer.size + model->sdpa_activation_buffer.size +
-        model->gate_activation_buffer.size + model->expert_activation_buffer.size + model->swiglu_activation_buffer.size + model->moe_activation_buffer.size;
-
     // Commit tokenizer
     model->tokenizer = tokenizer;
     tokenizer = NULL;
@@ -498,16 +469,6 @@ enum gptoss_status GPTOSS_ABI gptoss_model_release(
         if (atomic_fetch_sub_explicit(&model->ref_count, 1, memory_order_acq_rel) == 1) {
             gptoss_tokenizer_release(model->tokenizer);
 
-            // Activation buffers
-            gptoss_metal_buffer_release(&model->residual_activation_buffer);
-            gptoss_metal_buffer_release(&model->rmsnorm_activation_buffer);
-            gptoss_metal_buffer_release(&model->qkv_activation_buffer);
-            gptoss_metal_buffer_release(&model->sdpa_activation_buffer);
-            gptoss_metal_buffer_release(&model->gate_activation_buffer);
-            gptoss_metal_buffer_release(&model->expert_activation_buffer);
-            gptoss_metal_buffer_release(&model->swiglu_activation_buffer);
-            gptoss_metal_buffer_release(&model->moe_activation_buffer);
-
             // Weight buffers
             gptoss_metal_buffer_release(&model->shared_weight_buffer);
             for (uint32_t n = 0; n < model->num_blocks; n++) {
@@ -526,6 +487,7 @@ enum gptoss_status GPTOSS_ABI gptoss_model_release(
             gptoss_metal_function_release(&model->f32_topk_softmax_e32_k4_fn);
             gptoss_metal_function_release(&model->f32_topk_softmax_e128_k4_fn);
             gptoss_metal_function_release(&model->f32_softmax_fn);
+            gptoss_metal_function_release(&model->f32_sample_fn);
             gptoss_metal_function_release(&model->f32_sdpa_q8_d64_fn);
             gptoss_metal_library_release(&model->library);
 
@@ -534,6 +496,12 @@ enum gptoss_status GPTOSS_ABI gptoss_model_release(
             // Weight buffers
 
             if (model->mapping_ptr != NULL && model->mapping_size != 0) {
+                if (model->lock_memory) {
+                    if (munlock(model->mapping_ptr, model->mapping_size) != 0) {
+                        GPTOSS_LOG_WARNING("munlock for model weight mapping failed with error %d", errno);
+                    }
+                }
+
                 if (munmap(model->mapping_ptr, model->mapping_size) != 0) {
                     GPTOSS_LOG_WARNING("munmap for model weight mapping failed with error %d", errno);
                 }
